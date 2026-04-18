@@ -1,4 +1,3 @@
-
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import axios from "axios";
@@ -9,9 +8,9 @@ import { WebSocketServer, WebSocket } from "ws";
 import http from "http";
 import jwt from "jsonwebtoken";
 import TelegramBot from 'node-telegram-bot-api';
-import { query, initializeDatabase } from "./src/lib/db.ts";
-import { MarketType, ExchangeConfig, SYMBOLS, getConfigsForMarket } from "./models/index.ts";
-import { ServerSmarteyeEngine } from "./src/lib/server-engine.ts";
+import { query, initializeDatabase } from "./src/lib/db";
+import { MarketType, ExchangeConfig, SYMBOLS, getConfigsForMarket } from "./models/index";
+import { ServerSmarteyeEngine } from "./src/lib/server-engine";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -266,8 +265,7 @@ bot.on('successful_payment', async (msg) => {
 
 async function startServer() {
   const app = express();
-  app.set('trust proxy', true);
-  const PORT = process.env.PORT || 3000;
+  const PORT = 3000;
 
   // Initialize DB
   try {
@@ -331,6 +329,19 @@ async function startServer() {
     } catch (error) {
       console.error("Database status check failed:", error);
       res.status(500).json({ status: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get("/api/db/columns", async (req, res) => {
+    try {
+      const result = await query(`
+        SELECT column_name, data_type 
+        FROM information_schema.columns 
+        WHERE table_name = 'users'
+      `);
+      res.json(result.rows);
+    } catch (error) {
+      res.status(500).json({ error: String(error) });
     }
   });
 
@@ -425,54 +436,59 @@ async function startServer() {
 
   app.post("/api/auth/register", express.json(), async (req, res) => {
     const { email, password, username, referrerId } = req.body;
+    console.log(`[Auth] Registration attempt for email: ${email}, username: ${username}, referrerId: ${referrerId}`);
+    
     try {
+      if (!email || !password) {
+        return res.status(400).json({ error: "Email and password are required" });
+      }
+
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({ error: "Invalid email format" });
+      }
+
       const existing = await query("SELECT * FROM users WHERE email = $1", [email]);
       if (existing.rows.length > 0) {
         return res.status(400).json({ error: "User already exists" });
       }
 
-      // Validate referrerId is a valid UUID
-      const finalReferrerId = (referrerId && isUUID(String(referrerId))) ? referrerId : null;
+      // Validate referrerId if provided
+      let validReferrerId = null;
+      if (referrerId && isUUID(referrerId)) {
+        validReferrerId = referrerId;
+      } else if (referrerId) {
+        console.warn(`[Auth] Invalid referrerId received: ${referrerId}`);
+      }
 
       // WARNING: Storing passwords in plain text is highly insecure.
       // This was implemented per user request.
       const result = await query(
         "INSERT INTO users (email, password, username, referrer_id) VALUES ($1, $2, $3, $4) RETURNING id, email, username, subscription_tier, avatar_tier, premium_end_date, balance, role, referrer_id, created_at",
-        [email, password, username || email.split("@")[0], finalReferrerId]
+        [email, password, username || email.split("@")[0], validReferrerId]
       );
 
       const user = result.rows[0];
+      console.log(`[Auth] User registered successfully: ${user.id}`);
 
-      const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
-
-      // If there's a valid referrer, create a referral record
-      if (finalReferrerId) {
+      // If there's a referrer, create a referral record
+      if (validReferrerId) {
         try {
           await query(
             "INSERT INTO referrals (referrer_id, referred_user_id, status) VALUES ($1, $2, $3) ON CONFLICT (referred_user_id) DO NOTHING",
-            [finalReferrerId, user.id, 'unpaid']
+            [validReferrerId, user.id, 'unpaid']
           );
+          console.log(`[Auth] Referral record created for user ${user.id} referred by ${validReferrerId}`);
         } catch (e) {
-          console.error("Failed to create referral record:", e);
+          console.error("[Auth] Failed to create referral record:", e);
         }
       }
 
+      const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
       res.json({ user, token });
-    } catch (error: any) {
-      console.error("Registration error:", error);
-      let errorMessage = "Registration failed";
-      
-      if (error.code === '23505') { // PostgreSQL unique violation
-        if (error.detail?.includes('email')) {
-          errorMessage = "User with this email already exists";
-        }
-      } else if (error.code === '42P01') { // Table does not exist
-        errorMessage = "Database not initialized. Please try again in 1 minute.";
-      } else if (error.code === '28P01') { // Invalid login (DB)
-        errorMessage = "Database authentication failed. Check DATABASE_URL.";
-      }
-      
-      res.status(500).json({ error: errorMessage, details: process.env.NODE_ENV !== 'production' ? error.message : undefined });
+    } catch (error) {
+      console.error("[Auth] Registration error:", error);
+      res.status(500).json({ error: "Registration failed. Please check your database connection or try again later." });
     }
   });
 
@@ -906,27 +922,14 @@ async function startServer() {
   });
 
   // API Health
-  app.get("/api/health", async (req, res) => {
-    try {
-      // Test DB connection
-      const dbTest = await query("SELECT NOW()");
-      res.json({ 
-        status: "ok", 
-        database: "connected",
-        time: dbTest.rows[0].now,
-        env: process.env.NODE_ENV || 'development'
-      });
-    } catch (error) {
-      res.status(500).json({ 
-        status: "error", 
-        database: "disconnected", 
-        error: error instanceof Error ? error.message : String(error) 
-      });
-    }
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok" });
   });
 
   // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  const isProd = process.env.NODE_ENV === "production";
+  
+  if (!isProd) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -934,9 +937,11 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     // Serve static files in production
-    app.use(express.static(path.join(__dirname, "dist")));
+    // Use process.cwd() to ensure it works whether running from root or dist/ server
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
     app.get("*all", (req, res) => {
-      res.sendFile(path.join(__dirname, "dist", "index.html"));
+      res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
