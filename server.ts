@@ -1,3 +1,4 @@
+
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import axios from "axios";
@@ -265,7 +266,8 @@ bot.on('successful_payment', async (msg) => {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  app.set('trust proxy', true);
+  const PORT = process.env.PORT || 3000;
 
   // Initialize DB
   try {
@@ -429,32 +431,48 @@ async function startServer() {
         return res.status(400).json({ error: "User already exists" });
       }
 
+      // Validate referrerId is a valid UUID
+      const finalReferrerId = (referrerId && isUUID(String(referrerId))) ? referrerId : null;
+
       // WARNING: Storing passwords in plain text is highly insecure.
       // This was implemented per user request.
       const result = await query(
         "INSERT INTO users (email, password, username, referrer_id) VALUES ($1, $2, $3, $4) RETURNING id, email, username, subscription_tier, avatar_tier, premium_end_date, balance, role, referrer_id, created_at",
-        [email, password, username || email.split("@")[0], referrerId || null]
+        [email, password, username || email.split("@")[0], finalReferrerId]
       );
 
       const user = result.rows[0];
 
-      // If there's a referrer, create a referral record
-      if (referrerId) {
+      const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
+
+      // If there's a valid referrer, create a referral record
+      if (finalReferrerId) {
         try {
           await query(
             "INSERT INTO referrals (referrer_id, referred_user_id, status) VALUES ($1, $2, $3) ON CONFLICT (referred_user_id) DO NOTHING",
-            [referrerId, user.id, 'unpaid']
+            [finalReferrerId, user.id, 'unpaid']
           );
         } catch (e) {
           console.error("Failed to create referral record:", e);
         }
       }
 
-      const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
       res.json({ user, token });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Registration error:", error);
-      res.status(500).json({ error: "Registration failed" });
+      let errorMessage = "Registration failed";
+      
+      if (error.code === '23505') { // PostgreSQL unique violation
+        if (error.detail?.includes('email')) {
+          errorMessage = "User with this email already exists";
+        }
+      } else if (error.code === '42P01') { // Table does not exist
+        errorMessage = "Database not initialized. Please try again in 1 minute.";
+      } else if (error.code === '28P01') { // Invalid login (DB)
+        errorMessage = "Database authentication failed. Check DATABASE_URL.";
+      }
+      
+      res.status(500).json({ error: errorMessage, details: process.env.NODE_ENV !== 'production' ? error.message : undefined });
     }
   });
 
@@ -888,8 +906,23 @@ async function startServer() {
   });
 
   // API Health
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+  app.get("/api/health", async (req, res) => {
+    try {
+      // Test DB connection
+      const dbTest = await query("SELECT NOW()");
+      res.json({ 
+        status: "ok", 
+        database: "connected",
+        time: dbTest.rows[0].now,
+        env: process.env.NODE_ENV || 'development'
+      });
+    } catch (error) {
+      res.status(500).json({ 
+        status: "error", 
+        database: "disconnected", 
+        error: error instanceof Error ? error.message : String(error) 
+      });
+    }
   });
 
   // Vite middleware for development
