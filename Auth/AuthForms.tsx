@@ -19,7 +19,7 @@ export const AuthCard: React.FC<any> = ({ authMode, setAuthMode, onLoginSuccess,
     const handleMessage = (event: MessageEvent) => {
       // Validate origin
       const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) {
+      if (!origin.endsWith('.run.app') && !origin.includes('localhost') && !origin.endsWith('.onrender.com')) {
         return;
       }
 
