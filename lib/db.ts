@@ -106,8 +106,16 @@ export async function initializeDatabase() {
     for (const col of columnsToAdd) {
       try {
         await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ${col.name} ${col.type} ${col.default ? `DEFAULT ${col.default}` : ''}`);
-      } catch (e) {
-        console.log(`Column ${col.name} might already exist or error:`, e instanceof Error ? e.message : e);
+      } catch (e: any) {
+        // SQL code 42701 is "duplicate_column", which ADD COLUMN IF NOT EXISTS should handle, 
+        // but if it still throws, we catch it.
+        const isConnectionError = e?.code === 'ENETUNREACH' || e?.code === 'ECONNREFUSED' || e?.message?.includes('connect');
+        if (isConnectionError) {
+          console.error(`CRITICAL CONNECTION ERROR while adding column ${col.name}:`, e.message);
+          throw new Error(`Database unreachable: ${e.message}`);
+        } else {
+          console.log(`Column ${col.name} status check:`, e instanceof Error ? e.message : e);
+        }
       }
     }
 
@@ -189,7 +197,11 @@ export async function initializeDatabase() {
           created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
       `);
-    } catch (e) {
+    } catch (e: any) {
+      if (e?.code === 'ENETUNREACH' || e?.message?.includes('connect')) {
+         console.error("FATAL: Lost connection during table creation.");
+         throw e;
+      }
       console.warn('Error creating additional tables:', e instanceof Error ? e.message : e);
     }
 
@@ -198,7 +210,8 @@ export async function initializeDatabase() {
       await query("ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS sender_role TEXT DEFAULT 'user'");
       await query("ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS sender_type TEXT DEFAULT 'user'");
       await query("ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT false");
-    } catch (e) {
+    } catch (e: any) {
+      if (e?.code === 'ENETUNREACH' || e?.message?.includes('connect')) throw e;
       console.log('Error adding columns to support_messages:', e instanceof Error ? e.message : e);
     }
 
