@@ -11,7 +11,7 @@ import {
   SymbolState, 
   DensityType,
   DEFAULT_SETTINGS
-} from '../../models/index.ts';
+} from '../../models/index';
 
 const CONFIG = {
   engineTickMs: 500,
